@@ -524,3 +524,333 @@ loadCredit();
 </script>
 </body>
 </html>
+  <div class="confirm-card">
+    <h2>تأیید ارسال</h2>
+    <p class="sub" style="margin-bottom:6px;">به شماره: <b id="confirm-mobile" style="color:var(--ink);"></b></p>
+    <div class="preview-box" id="confirm-preview"></div>
+    <div class="confirm-actions">
+      <button class="btn btn-ghost" id="btn-cancel-send">انصراف</button>
+      <button class="btn btn-primary" id="btn-confirm-send">ارسال واقعی</button>
+    </div>
+    <div class="error" id="confirm-error"></div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast">
+  <span class="tick">✓</span>
+  <span id="toast-text"></span>
+</div>
+
+<script>
+const STATUS_MESSAGES = {
+  0:"مشکلی در سامانه رخ داده — بعداً تلاش کنید.",
+  10:"کلید API نامعتبر است.",
+  11:"کلید API غیرفعال است.",
+  12:"این کلید فقط برای IPهای مشخص‌شده مجاز است.",
+  13:"حساب کاربری غیرفعال است.",
+  14:"حساب کاربری در حالت تعلیق است.",
+  20:"تعداد درخواست‌ها بیش از حد مجاز است.",
+  101:"شماره خط نامعتبر است.",
+  102:"اعتبار حساب کافی نیست.",
+  103:"متن پیامک خالی است.",
+  104:"شماره موبایل واردشده نادرست است.",
+  105:"تعداد موبایل‌ها بیش از حد مجاز (۱۰۰) است.",
+  107:"لیست موبایل‌ها خالی است.",
+  109:"زمان ارسال نامعتبر است.",
+  113:"کد الگو (Template ID) پیدا نشد.",
+  114:"طول یکی از مقادیر پارامتر بیش از حد مجاز (۲۵ کاراکتر) است.",
+  115:"این شماره در لیست سیاه سامانه است.",
+  116:"نام یکی از پارامترها خالی است.",
+  117:"متن ارسالی مورد تأیید سامانه نیست."
+};
+const DELIVERY_STATES = {1:{t:"رسیده به گوشی",c:"st-ok"},2:{t:"نرسیده به گوشی",c:"st-bad"},3:{t:"در حال پردازش",c:"st-wait"},4:{t:"نرسیده به مخابرات",c:"st-bad"},5:{t:"رسیده به مخابرات",c:"st-wait"},6:{t:"خطا",c:"st-bad"},7:{t:"لیست سیاه",c:"st-bad"}};
+
+const $ = id => document.getElementById(id);
+const show = el => el.classList.remove('hidden');
+const hide = el => el.classList.add('hidden');
+
+// ================= CONFIG (built-in — edit directly, no settings screen for end users) =================
+const CONFIG = {
+  apiKey: "VrgXzENLXQakxePVIQUnU8wtrXxeendZVf5GSpvca1R3dSDK",
+  mobileDefault: "",
+  templates: [
+    {
+      id: "031646",
+      name: "متن ثبت شد",
+      templateText: "متقاضی گرامی #GENDER# #NAME# با کد ملی #NATIONALID# دانشنامه #DEGREE# شما در رشته #FIELD# با شناسه #ID# ثبت گردید.\nواحد #UNIT#",
+      fields: [
+        { key:"GENDER", label:"عنوان", type:"choice", options:[
+            {value:"آقای", label:"آقای"},
+            {value:"خانم", label:"خانم"},
+            {value:"", label:"بدون عنوان"}
+          ] },
+        { key:"NAME", label:"نام و نام‌خانوادگی", type:"text" },
+        { key:"NATIONALID", label:"کد ملی", type:"text" },
+        { key:"DEGREE", label:"مقطع", type:"choice", options:[
+            {value:"دوره متوسطه", label:"دوره متوسطه"},
+            {value:"کاردانی", label:"کاردانی"},
+            {value:"کارشناسی", label:"کارشناسی"},
+            {value:"کارشناسی ارشد", label:"کارشناسی ارشد"},
+            {value:"دکتری", label:"دکتری"},
+            {value:"دکتری حرفه‌ای", label:"دکتری حرفه‌ای"}
+          ] },
+        { key:"FIELD", label:"رشته", type:"text" },
+        { key:"ID", label:"شناسه", type:"random6" },
+        { key:"UNIT", label:"واحد", type:"choice", options:[
+            "مرکز","مرکزی","تهران","شمال","جنوب","اطراف",
+            "کرج","شیراز","اصفهان","مشهد","تبریز","اهواز","قم","کرمانشاه",
+            "ارومیه","رشت","کرمان","همدان","یزد","اراک","بندرعباس","اردبیل",
+            "زاهدان","سنندج","قزوین","ساری","گرگان","خرم‌آباد","ایلام",
+            "بوشهر","بیرجند","سمنان","شهرکرد","یاسوج","زنجان","بجنورد"
+          ].map(c => ({value:c, label:c})) }
+      ]
+    }
+  ]
+};
+// ==========================================================================================
+
+let settings = CONFIG;
+let currentTemplateIdx = 0;
+let fieldValues = {}; // key -> value, for current template
+
+function apiHeaders(){ return { 'Content-Type':'application/json', 'Accept':'application/json', 'X-API-KEY': settings.apiKey }; }
+
+// ---------------- TOAST ----------------
+let toastTimer = null;
+function showToast(msg, onClick){
+  const t = $('toast');
+  $('toast-text').textContent = msg;
+  t.classList.add('show');
+  t.onclick = () => { hide_toast(); if(onClick) onClick(); };
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(hide_toast, 6000);
+}
+function hide_toast(){ $('toast').classList.remove('show'); }
+
+// ---------------- CREDIT ----------------
+async function loadCredit(){
+  try{
+    const res = await fetch('https://api.sms.ir/v1/credit', { headers: apiHeaders() });
+    const data = await res.json();
+    if(data.status === 1){ $('credit-chip').textContent = `اعتبار: ${data.data}`; show($('credit-chip')); }
+  }catch(e){ /* silent */ }
+}
+
+// ---------------- TABS ----------------
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+});
+function switchTab(tab){
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  document.querySelectorAll('[id^="tab-"]').forEach(t => hide(t));
+  show($('tab-' + tab));
+  if(tab === 'bulk') loadLines();
+}
+
+// ---------------- TEMPLATE CHIPS ----------------
+function renderTemplateChips(){
+  const wrap = $('template-chips');
+  wrap.innerHTML = '';
+  CONFIG.templates.forEach((tpl, idx) => {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'chip' + (idx === currentTemplateIdx ? ' selected' : '');
+    chip.textContent = tpl.name;
+    chip.addEventListener('click', () => { currentTemplateIdx = idx; renderTemplateChips(); renderFields(); });
+    wrap.appendChild(chip);
+  });
+}
+
+// ---------------- DYNAMIC FIELDS ----------------
+function currentTemplate(){ return CONFIG.templates[currentTemplateIdx]; }
+
+function renderFields(){
+  fieldValues = {};
+  const wrap = $('dynamic-fields');
+  wrap.innerHTML = '';
+  hide($('preview-group'));
+  hide($('send-error'));
+
+  currentTemplate().fields.forEach(field => {
+    const label = document.createElement('label');
+    label.textContent = field.label;
+    wrap.appendChild(label);
+
+    if(field.type === 'text'){
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.addEventListener('input', () => { fieldValues[field.key] = input.value; hide($('preview-group')); });
+      wrap.appendChild(input);
+
+    } else if(field.type === 'choice'){
+      const group = document.createElement('div');
+      group.className = 'chip-group';
+      field.options.forEach(opt => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'chip';
+        chip.textContent = opt.label;
+        chip.addEventListener('click', () => {
+          group.querySelectorAll('.chip').forEach(c => c.classList.remove('selected'));
+          chip.classList.add('selected');
+          fieldValues[field.key] = opt.value;
+          hide($('preview-group'));
+        });
+        group.appendChild(chip);
+      });
+      wrap.appendChild(group);
+
+    } else if(field.type === 'random6'){
+      const row = document.createElement('div');
+      row.className = 'row';
+      const input = document.createElement('input');
+      input.type = 'text'; input.inputMode = 'numeric';
+      input.addEventListener('input', () => { fieldValues[field.key] = input.value; hide($('preview-group')); });
+      const btn = document.createElement('button');
+      btn.type = 'button'; btn.className = 'btn btn-ghost'; btn.textContent = 'تصادفی';
+      btn.addEventListener('click', () => {
+        const code = String(Math.floor(100000 + Math.random()*900000));
+        input.value = code;
+        fieldValues[field.key] = code;
+        hide($('preview-group'));
+      });
+      row.appendChild(input); row.appendChild(btn);
+      wrap.appendChild(row);
+    }
+  });
+}
+
+function buildPreview(){
+  const tpl = currentTemplate();
+  let text = tpl.templateText;
+  Object.keys(fieldValues).forEach(k => { text = text.replace(new RegExp('#'+k+'#','g'), fieldValues[k] ?? ''); });
+  text = text.replace(/[ \t]{2,}/g, ' ').replace(/ \n/g, '\n');
+  return text;
+}
+
+$('btn-create').addEventListener('click', () => {
+  hide($('send-error'));
+  const tpl = currentTemplate();
+  for(const f of tpl.fields){
+    const v = fieldValues[f.key];
+    if(v === undefined || v === null || v === ''){
+      if(f.type === 'choice' && f.options.some(o => o.value === '')) continue; // "بدون عنوان" مجاز است خالی باشد
+      $('send-error').textContent = `مقدار «${f.label}» را وارد کنید.`;
+      show($('send-error'));
+      return;
+    }
+  }
+  $('preview-text').textContent = buildPreview();
+  show($('preview-group'));
+});
+
+$('btn-final-send').addEventListener('click', () => {
+  const mobile = $('send-mobile').value.trim();
+  hide($('send-error'));
+  if(!mobile){ $('send-error').textContent = "شماره موبایل گیرنده را وارد کنید."; show($('send-error')); return; }
+  $('confirm-mobile').textContent = mobile;
+  $('confirm-preview').textContent = buildPreview();
+  hide($('confirm-error'));
+  show($('confirm-overlay'));
+});
+$('btn-cancel-send').addEventListener('click', () => hide($('confirm-overlay')));
+$('btn-confirm-send').addEventListener('click', async () => {
+  const mobile = $('send-mobile').value.trim();
+  const tpl = currentTemplate();
+  const parameters = tpl.fields.map(f => ({ name: f.key, value: fieldValues[f.key] ?? '' }));
+  const btn = $('btn-confirm-send');
+  btn.disabled = true; const orig = btn.textContent; btn.textContent = 'در حال ارسال...';
+  hide($('confirm-error'));
+  try{
+    const res = await fetch('https://api.sms.ir/v1/send/verify', {
+      method:'POST', headers: apiHeaders(),
+      body: JSON.stringify({ mobile, templateId: Number(tpl.id), parameters })
+    });
+    const data = await res.json();
+    if(data.status === 1){
+      hide($('confirm-overlay'));
+      loadCredit();
+      showToast('ارسال شد — برای نتیجه به «تاریخچه» مراجعه کنید', () => switchTab('history'));
+      // بازنشانی فرم برای ارسال بعدی
+      $('send-mobile').value = settings.mobileDefault || "";
+      renderFields();
+    } else {
+      $('confirm-error').textContent = STATUS_MESSAGES[data.status] || data.message || "ارسال ناموفق بود.";
+      show($('confirm-error'));
+    }
+  }catch(e){
+    $('confirm-error').textContent = "اتصال برقرار نشد. دوباره تلاش کنید.";
+    show($('confirm-error'));
+  }finally{ btn.disabled = false; btn.textContent = orig; }
+});
+
+// ---------------- BULK FREE-TEXT SEND ----------------
+async function loadLines(){
+  const sel = $('bulk-line');
+  try{
+    const res = await fetch('https://api.sms.ir/v1/line', { headers: apiHeaders() });
+    const data = await res.json();
+    if(data.status === 1 && Array.isArray(data.data)){
+      sel.innerHTML = data.data.map(l => `<option value="${l}">${l}</option>`).join('');
+    } else { sel.innerHTML = `<option value="">خطی یافت نشد</option>`; }
+  }catch(e){ sel.innerHTML = `<option value="">خطا در بارگذاری خطوط</option>`; }
+}
+$('btn-bulk-send').addEventListener('click', () => { /* فعلاً غیرفعال است */ });
+
+// ---------------- HISTORY ----------------
+$('btn-load-history').addEventListener('click', async () => {
+  hide($('history-error'));
+  const tbody = document.querySelector('#history-table tbody');
+  tbody.innerHTML = '<tr><td colspan="3">در حال بارگذاری...</td></tr>';
+  try{
+    const res = await fetch('https://api.sms.ir/v1/send/live', { headers: apiHeaders() });
+    const data = await res.json();
+    if(data.status === 1){
+      tbody.innerHTML = '';
+      (data.data || []).forEach(item => {
+        const st = DELIVERY_STATES[item.deliveryState] || {t:'نامشخص',c:'st-wait'};
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${item.mobile}</td><td>${(item.messageText||'').slice(0,30)}</td><td><span class="status-pill ${st.c}">${st.t}</span></td>`;
+        tbody.appendChild(tr);
+      });
+      if((data.data || []).length === 0) tbody.innerHTML = '<tr><td colspan="3">موردی یافت نشد.</td></tr>';
+    } else {
+      $('history-error').textContent = STATUS_MESSAGES[data.status] || "خطا در دریافت گزارش.";
+      show($('history-error')); tbody.innerHTML = '';
+    }
+  }catch(e){ $('history-error').textContent = "اتصال برقرار نشد."; show($('history-error')); tbody.innerHTML = ''; }
+});
+
+// ---------------- INBOX ----------------
+$('btn-load-inbox').addEventListener('click', async () => {
+  hide($('inbox-error'));
+  const tbody = document.querySelector('#inbox-table tbody');
+  tbody.innerHTML = '<tr><td colspan="3">در حال بارگذاری...</td></tr>';
+  try{
+    const res = await fetch('https://api.sms.ir/v1/receive/live', { headers: apiHeaders() });
+    const data = await res.json();
+    if(data.status === 1){
+      tbody.innerHTML = '';
+      (data.data || []).forEach(item => {
+        const time = item.receivedDateTime ? new Date(item.receivedDateTime * 1000).toLocaleString('fa-IR') : '-';
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${item.mobile}</td><td>${(item.messageText||'').slice(0,30)}</td><td>${time}</td>`;
+        tbody.appendChild(tr);
+      });
+      if((data.data || []).length === 0) tbody.innerHTML = '<tr><td colspan="3">پیامکی یافت نشد.</td></tr>';
+    } else {
+      $('inbox-error').textContent = STATUS_MESSAGES[data.status] || "خطا در دریافت پیامک‌ها.";
+      show($('inbox-error')); tbody.innerHTML = '';
+    }
+  }catch(e){ $('inbox-error').textContent = "اتصال برقرار نشد."; show($('inbox-error')); tbody.innerHTML = ''; }
+});
+
+// ---------------- BOOTSTRAP ----------------
+$('send-mobile').value = settings.mobileDefault || "";
+renderTemplateChips();
+renderFields();
+loadCredit();
+</script>
+</body>
+</html>
